@@ -12,6 +12,14 @@ This repository contains the on-chain components: device registry, shipment life
 
 The program is pinned to this address on every cluster. The deploy keypair lives at `APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP.json` at the repo root — its filename is its public key, so the keypair's identity is self-evident.
 
+## Deployments
+
+| Cluster | Program | Deploy transaction | IDL account |
+|---|---|---|---|
+| devnet | [`APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP`](https://solscan.io/account/APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP?cluster=devnet) | [`2QcXmnEF…YdkW`](https://solscan.io/tx/2QcXmnEFz2dnVNzPNjdwHio3DTs5FP56qkQq8kzoe4BRAX9kCUBHpW3NHwHgvZCYDkfz338ffC3r8Zuue93mDYdkW?cluster=devnet) | [`Go4Lhea…23n1m`](https://solscan.io/account/Go4LheavUvDmRzgU9eAQ3ygYEMqErYsWKWE3vmH23n1m?cluster=devnet) |
+
+The full integration test suite passes against this deployed program — every state transition, account creation, and `getProgramAccounts` query exercised below is verifiable on-chain.
+
 ## Why this design
 
 Cold-chain disputes cost the pharmaceutical industry $35B annually. The verification problem is structural: temperature logs are stored centrally, can be edited, backdated, and challenged in court. April Gate replaces thousands of mutable readings with a single tamper-evident proof, anchored on Solana.
@@ -176,6 +184,11 @@ anchor test --provider.cluster devnet --skip-deploy --skip-local-validator
 - **Multi-authority workflows.** Device manufacturer registers and owns devices; logistics operator creates shipments; assignment requires both signatures. Mirrors real-world responsibility split.
 - **Cross-vendor device identifiers.** The 23 reserved bytes in `device_id` will encode a vendor namespace tag (ATECC608, NXP A1006, STSAFE, etc.) so the registry can accommodate multiple secure-element families.
 - **Status extensions.** Add `Disputed` and `Cancelled` states for real-world insurance and exception flows.
+
+## Built by
+
+**Irina Guberman** — Principal engineer with 25+ years across Solana (Neon Labs), IoT cybersecurity (Xaptum), and high-throughput fintech (BlockFi, ICE).
+[GitHub](https://github.com/iguberman) · [LinkedIn](https://linkedin.com/in/irinaguberman)
 
 ## Related repositories
 
