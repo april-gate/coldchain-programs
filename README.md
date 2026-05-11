@@ -180,10 +180,10 @@ anchor test --provider.cluster devnet --skip-deploy --skip-local-validator
 
 ## Roadmap
 
-- **Stronger on-chain verification.** Currently `submit_proof` stores a commitment binding the off-chain aggregated proof. A future iteration verifies the aggregated signature directly on-chain, removing the need to trust the submitter at all.
 - **Multi-authority workflows.** Device manufacturer registers and owns devices; logistics operator creates shipments; assignment requires both signatures. Mirrors real-world responsibility split.
 - **Cross-vendor device identifiers.** The 23 reserved bytes in `device_id` will encode a vendor namespace tag (ATECC608, NXP A1006, STSAFE, etc.) so the registry can accommodate multiple secure-element families.
 - **Status extensions.** Add `Disputed` and `Cancelled` states for real-world insurance and exception flows.
+- **Permissionless verification (ZK).** Today, the on-chain commitment binds an off-chain BLS aggregate produced by the sensor quorum, and compliance verdicts are served by the operator's API to authorized parties. This is the right model when the operator is trusted by all consumers of the data (insurers, regulators) — which is the case in our insurer-first GTM. For deployments where consumers need to verify compliance directly from Solana without trusting the operator (public regulators, consortium operators, third-party auditors), `submit_proof` can be extended to accept a Groth16 proof verified entirely on-chain — proving the quorum agreed on readings within bounds, without revealing the readings themselves. ZK is a mode the architecture supports when the trust model demands it, not a default requirement when the existing BLS aggregate already cryptographically attests that a threshold of hardware-rooted devices agreed.
 
 ## License
 
