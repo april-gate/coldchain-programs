@@ -6,10 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-device_registry = "APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP"
+device_registry = "APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez"
 
 [programs.devnet]
-device_registry = "APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP"
+device_registry = "APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez"
 
 [registry]
 url = "https://api.apr.dev"

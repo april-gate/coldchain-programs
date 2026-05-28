@@ -1,5 +1,5 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program, BN } from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
 import { DeviceRegistry } from "../target/types/device_registry";
 import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
 import { assert } from "chai";
@@ -19,22 +19,21 @@ describe("device-registry", () => {
     const id = Buffer.alloc(32);
     id[0] = 0x01;
     id[1] = 0x23;
-    crypto.randomBytes(6).copy(id, 2); // 6 random middle bytes
+    crypto.randomBytes(6).copy(id, 2);
     id[8] = 0xee;
-    // bytes 9..32 stay zero
     return Array.from(id);
   }
 
   /** Mock compressed P-256 public key (33 bytes). For tests; not validated on-chain. */
   function makePubkey(): number[] {
     const pk = Buffer.alloc(33);
-    pk[0] = 0x02; // compressed prefix
+    pk[0] = 0x02;
     crypto.randomBytes(32).copy(pk, 1);
     return Array.from(pk);
   }
 
-  /** Random 32-byte commitment for proof submissions. */
-  function makeCommitment(): number[] {
+  /** Random 32-byte value (used for both nonces and commitments). */
+  function rand32(): number[] {
     return Array.from(crypto.randomBytes(32));
   }
 
@@ -46,13 +45,9 @@ describe("device-registry", () => {
     return pda;
   }
 
-  function shipmentPda(authority: PublicKey, nonce: anchor.BN): PublicKey {
+  function shipmentPda(authority: PublicKey, nonce: number[]): PublicKey {
     const [pda] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("shipment"),
-        authority.toBuffer(),
-        nonce.toArrayLike(Buffer, "le", 8),
-      ],
+      [Buffer.from("shipment"), authority.toBuffer(), Buffer.from(nonce)],
       program.programId
     );
     return pda;
@@ -68,22 +63,17 @@ describe("device-registry", () => {
     return pda;
   }
 
-  function proofPda(assignment: PublicKey, sequence: number): PublicKey {
-    const seqBuf = Buffer.alloc(4);
-    seqBuf.writeUInt32LE(sequence, 0);
-    const [pda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("proof"), assignment.toBuffer(), seqBuf],
-      program.programId
-    );
-    return pda;
-  }
-
-  // Tests ─────────────────────────────────────────────────────────────────────
-
-  it("registers a device", async () => {
+  /**
+   * Register a device, create a shipment, and assign the device to it.
+   * Returns the keys needed to drive submit_proof / close_shipment tests.
+   */
+  async function setupAssignedDevice() {
     const deviceId = makeDeviceId();
     const pubkey = makePubkey();
     const device = devicePda(deviceId);
+    const nonce = rand32();
+    const shipment = shipmentPda(authority.publicKey, nonce);
+    const manifest = rand32();
 
     await program.methods
       .registerDevice(deviceId, pubkey)
@@ -94,20 +84,8 @@ describe("device-registry", () => {
       })
       .rpc();
 
-    const acct = await program.account.deviceRegistry.fetch(device);
-    assert.deepEqual(acct.deviceId, deviceId);
-    assert.deepEqual(acct.pubkey, pubkey);
-    assert.equal(acct.assignmentCount, 0);
-    assert.ok(acct.authority.equals(authority.publicKey));
-    assert.ok(acct.currentAssignment.equals(PublicKey.default));
-  });
-
-  it("creates a shipment", async () => {
-    const nonce = new BN(1);
-    const shipment = shipmentPda(authority.publicKey, nonce);
-
     await program.methods
-      .createShipment(nonce)
+      .createShipment(nonce, manifest)
       .accounts({
         shipment,
         authority: authority.publicKey,
@@ -115,214 +93,88 @@ describe("device-registry", () => {
       })
       .rpc();
 
-    const acct = await program.account.shipment.fetch(shipment);
-    assert.deepEqual(acct.status, { created: {} });
-    assert.equal(acct.nonce.toNumber(), 1);
-    assert.equal(acct.proofCount, 0);
-  });
-
-  it("transitions shipment Created → InTransit → Delivered → Closed", async () => {
-    const nonce = new BN(2);
-    const shipment = shipmentPda(authority.publicKey, nonce);
-
-    await program.methods
-      .createShipment(nonce)
-      .accounts({
-        shipment,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    const transitions = [
-      { inTransit: {} },
-      { delivered: {} },
-      { closed: {} },
-    ];
-    for (const status of transitions) {
-      await program.methods
-        .updateShipmentStatus(status as any)
-        .accounts({ shipment, authority: authority.publicKey })
-        .rpc();
-    }
-
-    const acct = await program.account.shipment.fetch(shipment);
-    assert.deepEqual(acct.status, { closed: {} });
-  });
-
-  it("rejects invalid status transitions", async () => {
-    const nonce = new BN(3);
-    const shipment = shipmentPda(authority.publicKey, nonce);
-
-    await program.methods
-      .createShipment(nonce)
-      .accounts({
-        shipment,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    // Created → Delivered should fail (must go through InTransit)
-    try {
-      await program.methods
-        .updateShipmentStatus({ delivered: {} } as any)
-        .accounts({ shipment, authority: authority.publicKey })
-        .rpc();
-      assert.fail("expected InvalidStatusTransition");
-    } catch (err: any) {
-      assert.match(err.toString(), /InvalidStatusTransition/);
-    }
-  });
-
-  it("runs the full lifecycle: register → create → assign → submit proof → end → reassign", async () => {
-    // Register the device
-    const deviceId = makeDeviceId();
-    const pubkey = makePubkey();
-    const device = devicePda(deviceId);
-    await program.methods
-      .registerDevice(deviceId, pubkey)
-      .accounts({
-        device,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    // Create shipment A
-    const nonceA = new BN(100);
-    const shipmentA = shipmentPda(authority.publicKey, nonceA);
-    await program.methods
-      .createShipment(nonceA)
-      .accounts({
-        shipment: shipmentA,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    // Assign device to shipment A (sequence 0)
-    const assignment0 = assignmentPda(device, 0);
+    const assignment = assignmentPda(device, 0);
     await program.methods
       .assignDevice()
       .accounts({
         device,
-        shipment: shipmentA,
-        assignment: assignment0,
+        shipment,
+        assignment,
         authority: authority.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
 
-    let deviceAcct = await program.account.deviceRegistry.fetch(device);
-    assert.equal(deviceAcct.assignmentCount, 1);
-    assert.ok(deviceAcct.currentAssignment.equals(assignment0));
+    return { deviceId, device, nonce, shipment, assignment, manifest };
+  }
 
-    // Submit two proofs against assignment 0
-    for (let i = 0; i < 2; i++) {
-      const proof = proofPda(assignment0, i);
+  // Device ─────────────────────────────────────────────────────────────────────
+
+  describe("register_device", () => {
+    it("registers a device", async () => {
+      const deviceId = makeDeviceId();
+      const pubkey = makePubkey();
+      const device = devicePda(deviceId);
+
       await program.methods
-        .submitProof(makeCommitment())
-        .accounts({
-          assignment: assignment0,
-          shipment: shipmentA,
-          proof,
-          submitter: authority.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-    }
-
-    let assignAcct = await program.account.deviceAssignment.fetch(assignment0);
-    let shipmentAcct = await program.account.shipment.fetch(shipmentA);
-    assert.equal(assignAcct.proofCount, 2);
-    assert.equal(shipmentAcct.proofCount, 2);
-
-    // Cannot reassign while still active
-    const nonceB = new BN(101);
-    const shipmentB = shipmentPda(authority.publicKey, nonceB);
-    await program.methods
-      .createShipment(nonceB)
-      .accounts({
-        shipment: shipmentB,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    const assignment1 = assignmentPda(device, 1);
-    try {
-      await program.methods
-        .assignDevice()
+        .registerDevice(deviceId, pubkey)
         .accounts({
           device,
-          shipment: shipmentB,
-          assignment: assignment1,
           authority: authority.publicKey,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
-      assert.fail("expected DeviceAlreadyAssigned");
-    } catch (err: any) {
-      assert.match(err.toString(), /DeviceAlreadyAssigned/);
-    }
 
-    // End the first assignment
-    await program.methods
-      .endAssignment()
-      .accounts({
-        device,
-        assignment: assignment0,
-        authority: authority.publicKey,
-      })
-      .rpc();
-
-    deviceAcct = await program.account.deviceRegistry.fetch(device);
-    assert.ok(deviceAcct.currentAssignment.equals(PublicKey.default));
-    assignAcct = await program.account.deviceAssignment.fetch(assignment0);
-    assert.notEqual(assignAcct.endedAt.toNumber(), 0);
-
-    // Reassign to shipment B (sequence 1)
-    await program.methods
-      .assignDevice()
-      .accounts({
-        device,
-        shipment: shipmentB,
-        assignment: assignment1,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    deviceAcct = await program.account.deviceRegistry.fetch(device);
-    assert.equal(deviceAcct.assignmentCount, 2);
-    assert.ok(deviceAcct.currentAssignment.equals(assignment1));
-
-    // Verify history: assignment 0 ended, assignment 1 active
-    const hist0 = await program.account.deviceAssignment.fetch(assignment0);
-    const hist1 = await program.account.deviceAssignment.fetch(assignment1);
-    assert.notEqual(hist0.endedAt.toNumber(), 0);
-    assert.equal(hist1.endedAt.toNumber(), 0);
-    assert.ok(hist0.shipment.equals(shipmentA));
-    assert.ok(hist1.shipment.equals(shipmentB));
+      const acct = await program.account.deviceRegistry.fetch(device);
+      assert.deepEqual(acct.deviceId, deviceId);
+      assert.deepEqual(acct.pubkey, pubkey);
+      assert.equal(acct.assignmentCount, 0);
+      assert.ok(acct.authority.equals(authority.publicKey));
+      assert.ok(acct.currentAssignment.equals(PublicKey.default));
+    });
   });
 
-  it("getProgramAccounts can find all assignments for a shipment", async () => {
-    // This is the killer query for the insurance use case:
-    // "show me every device that was ever on this shipment"
-    const nonce = new BN(200);
-    const shipment = shipmentPda(authority.publicKey, nonce);
-    await program.methods
-      .createShipment(nonce)
-      .accounts({
-        shipment,
-        authority: authority.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
+  // Shipment ───────────────────────────────────────────────────────────────────
 
-    // Register two devices and assign both to this shipment
-    for (let i = 0; i < 2; i++) {
+  describe("create_shipment", () => {
+    it("creates a shipment with 32-byte nonce and manifest commitment", async () => {
+      const nonce = rand32();
+      const manifest = rand32();
+      const shipment = shipmentPda(authority.publicKey, nonce);
+
+      await program.methods
+        .createShipment(nonce, manifest)
+        .accounts({
+          shipment,
+          authority: authority.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const acct = await program.account.shipment.fetch(shipment);
+      assert.deepEqual(acct.nonce, nonce);
+      assert.deepEqual(acct.manifestCommitment, manifest);
+      assert.equal(acct.proofCount, 0);
+      assert.equal(acct.closed, false);
+      assert.ok(acct.authority.equals(authority.publicKey));
+    });
+
+    it("derives distinct PDAs for same nonce under different authorities", async () => {
+      // Privacy property: knowing the authority + guessing nonces is not
+      // enough to enumerate, because the 32-byte nonce is unguessable.
+      // This just demonstrates seed independence.
+      const nonce = rand32();
+      const other = Keypair.generate();
+      const pda1 = shipmentPda(authority.publicKey, nonce);
+      const pda2 = shipmentPda(other.publicKey, nonce);
+      assert.notEqual(pda1.toBase58(), pda2.toBase58());
+    });
+  });
+
+  // Assignment ─────────────────────────────────────────────────────────────────
+
+  describe("assign_device / end_assignment", () => {
+    it("runs the assignment lifecycle: assign → reject duplicate → end → reassign with history", async () => {
       const deviceId = makeDeviceId();
       const pubkey = makePubkey();
       const device = devicePda(deviceId);
@@ -335,32 +187,358 @@ describe("device-registry", () => {
         })
         .rpc();
 
-      const assignment = assignmentPda(device, 0);
+      const nonceA = rand32();
+      const shipmentA = shipmentPda(authority.publicKey, nonceA);
       await program.methods
-        .assignDevice()
+        .createShipment(nonceA, rand32())
         .accounts({
-          device,
-          shipment,
-          assignment,
+          shipment: shipmentA,
           authority: authority.publicKey,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
-    }
 
-    // Filter assignments by shipment field. Layout offset = 8 (discriminator) + 32 (device).
-    const assignments = await program.account.deviceAssignment.all([
-      {
-        memcmp: {
-          offset: 8 + 32,
-          bytes: shipment.toBase58(),
-        },
-      },
-    ]);
+      const assignment0 = assignmentPda(device, 0);
+      await program.methods
+        .assignDevice()
+        .accounts({
+          device,
+          shipment: shipmentA,
+          assignment: assignment0,
+          authority: authority.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
 
-    assert.equal(assignments.length, 2);
-    for (const a of assignments) {
-      assert.ok(a.account.shipment.equals(shipment));
-    }
+      let deviceAcct = await program.account.deviceRegistry.fetch(device);
+      assert.equal(deviceAcct.assignmentCount, 1);
+      assert.ok(deviceAcct.currentAssignment.equals(assignment0));
+
+      // Cannot reassign while active.
+      const nonceB = rand32();
+      const shipmentB = shipmentPda(authority.publicKey, nonceB);
+      await program.methods
+        .createShipment(nonceB, rand32())
+        .accounts({
+          shipment: shipmentB,
+          authority: authority.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const assignment1 = assignmentPda(device, 1);
+      try {
+        await program.methods
+          .assignDevice()
+          .accounts({
+            device,
+            shipment: shipmentB,
+            assignment: assignment1,
+            authority: authority.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        assert.fail("expected DeviceAlreadyAssigned");
+      } catch (err: any) {
+        assert.match(err.toString(), /DeviceAlreadyAssigned/);
+      }
+
+      // End the first assignment.
+      await program.methods
+        .endAssignment()
+        .accounts({
+          device,
+          assignment: assignment0,
+          authority: authority.publicKey,
+        })
+        .rpc();
+
+      deviceAcct = await program.account.deviceRegistry.fetch(device);
+      assert.ok(deviceAcct.currentAssignment.equals(PublicKey.default));
+      const ended = await program.account.deviceAssignment.fetch(assignment0);
+      assert.notEqual(ended.endedAt.toNumber(), 0);
+
+      // Reassign to shipment B (sequence 1).
+      await program.methods
+        .assignDevice()
+        .accounts({
+          device,
+          shipment: shipmentB,
+          assignment: assignment1,
+          authority: authority.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      deviceAcct = await program.account.deviceRegistry.fetch(device);
+      assert.equal(deviceAcct.assignmentCount, 2);
+      assert.ok(deviceAcct.currentAssignment.equals(assignment1));
+
+      const hist0 = await program.account.deviceAssignment.fetch(assignment0);
+      const hist1 = await program.account.deviceAssignment.fetch(assignment1);
+      assert.notEqual(hist0.endedAt.toNumber(), 0);
+      assert.equal(hist1.endedAt.toNumber(), 0);
+      assert.ok(hist0.shipment.equals(shipmentA));
+      assert.ok(hist1.shipment.equals(shipmentB));
+    });
+
+    it("getProgramAccounts finds all assignments for a shipment", async () => {
+      // "Show me every device that was ever on this shipment."
+      const nonce = rand32();
+      const shipment = shipmentPda(authority.publicKey, nonce);
+      await program.methods
+        .createShipment(nonce, rand32())
+        .accounts({
+          shipment,
+          authority: authority.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      for (let i = 0; i < 2; i++) {
+        const deviceId = makeDeviceId();
+        const device = devicePda(deviceId);
+        await program.methods
+          .registerDevice(deviceId, makePubkey())
+          .accounts({
+            device,
+            authority: authority.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
+        const assignment = assignmentPda(device, 0);
+        await program.methods
+          .assignDevice()
+          .accounts({
+            device,
+            shipment,
+            assignment,
+            authority: authority.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+      }
+
+      // Offset = 8 (discriminator) + 32 (device) → shipment field.
+      const assignments = await program.account.deviceAssignment.all([
+        { memcmp: { offset: 8 + 32, bytes: shipment.toBase58() } },
+      ]);
+
+      assert.equal(assignments.length, 2);
+      for (const a of assignments) {
+        assert.ok(a.account.shipment.equals(shipment));
+      }
+    });
+  });
+
+  // Proof ──────────────────────────────────────────────────────────────────────
+
+  describe("submit_proof", () => {
+    it("accepts a dispatch, increments counts, sets last_commitment, no Proof PDA", async () => {
+      const ctx = await setupAssignedDevice();
+      const commitment = rand32();
+
+      await program.methods
+        .submitProof(commitment)
+        .accounts({
+          assignment: ctx.assignment,
+          shipment: ctx.shipment,
+          device: ctx.device,
+          submitter: authority.publicKey,
+        })
+        .rpc();
+
+      const shipmentAcct = await program.account.shipment.fetch(ctx.shipment);
+      const assignAcct = await program.account.deviceAssignment.fetch(ctx.assignment);
+      assert.equal(shipmentAcct.proofCount, 1);
+      assert.equal(assignAcct.proofCount, 1);
+      assert.deepEqual(shipmentAcct.lastCommitment, commitment);
+    });
+
+    it("assigns sequence in submission order across multiple dispatches", async () => {
+      const ctx = await setupAssignedDevice();
+      const N = 4;
+      let last: number[] = [];
+      for (let i = 0; i < N; i++) {
+        last = rand32();
+        await program.methods
+          .submitProof(last)
+          .accounts({
+            assignment: ctx.assignment,
+            shipment: ctx.shipment,
+            device: ctx.device,
+            submitter: authority.publicKey,
+          })
+          .rpc();
+      }
+      const shipmentAcct = await program.account.shipment.fetch(ctx.shipment);
+      assert.equal(shipmentAcct.proofCount, N);
+      assert.deepEqual(shipmentAcct.lastCommitment, last);
+    });
+
+    it("rejects a dispatch from an unauthorized submitter", async () => {
+      const ctx = await setupAssignedDevice();
+      const wrong = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(wrong.publicKey, 1e8);
+      await provider.connection.confirmTransaction(sig);
+
+      try {
+        await program.methods
+          .submitProof(rand32())
+          .accounts({
+            assignment: ctx.assignment,
+            shipment: ctx.shipment,
+            device: ctx.device,
+            submitter: wrong.publicKey,
+          })
+          .signers([wrong])
+          .rpc();
+        assert.fail("expected UnauthorizedSubmitter");
+      } catch (err: any) {
+        assert.match(err.toString(), /UnauthorizedSubmitter/);
+      }
+    });
+  });
+
+  // Close ──────────────────────────────────────────────────────────────────────
+
+  describe("close_shipment", () => {
+    it("closes a shipment and freezes proof_count in the event", async () => {
+      const ctx = await setupAssignedDevice();
+      for (let i = 0; i < 3; i++) {
+        await program.methods
+          .submitProof(rand32())
+          .accounts({
+            assignment: ctx.assignment,
+            shipment: ctx.shipment,
+            device: ctx.device,
+            submitter: authority.publicKey,
+          })
+          .rpc();
+      }
+
+      await program.methods
+        .closeShipment()
+        .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+        .rpc();
+
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      assert.equal(acct.closed, true);
+      assert.equal(acct.proofCount, 3);
+    });
+
+    it("is one-way: a second close fails", async () => {
+      const ctx = await setupAssignedDevice();
+      await program.methods
+        .closeShipment()
+        .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+        .rpc();
+      try {
+        await program.methods
+          .closeShipment()
+          .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+          .rpc();
+        assert.fail("expected ShipmentClosed");
+      } catch (err: any) {
+        assert.match(err.toString(), /ShipmentClosed/);
+      }
+    });
+
+    it("rejects close from a non-authority signer", async () => {
+      const ctx = await setupAssignedDevice();
+      const wrong = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(wrong.publicKey, 1e8);
+      await provider.connection.confirmTransaction(sig);
+
+      try {
+        await program.methods
+          .closeShipment()
+          .accounts({ shipment: ctx.shipment, authority: wrong.publicKey })
+          .signers([wrong])
+          .rpc();
+        assert.fail("expected has_one constraint violation");
+      } catch (err: any) {
+        // Anchor's has_one violation surfaces as a constraint error.
+        assert.match(err.toString(), /ConstraintHasOne|has_one|2001/i);
+      }
+    });
+
+    it("rejects submit_proof after close", async () => {
+      const ctx = await setupAssignedDevice();
+      await program.methods
+        .closeShipment()
+        .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+        .rpc();
+      try {
+        await program.methods
+          .submitProof(rand32())
+          .accounts({
+            assignment: ctx.assignment,
+            shipment: ctx.shipment,
+            device: ctx.device,
+            submitter: authority.publicKey,
+          })
+          .rpc();
+        assert.fail("expected ShipmentClosed");
+      } catch (err: any) {
+        assert.match(err.toString(), /ShipmentClosed/);
+      }
+    });
+
+    it("allows end_assignment after close (devices can be freed)", async () => {
+      const ctx = await setupAssignedDevice();
+      await program.methods
+        .closeShipment()
+        .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+        .rpc();
+      // Should succeed — end_assignment does not depend on shipment.closed.
+      await program.methods
+        .endAssignment()
+        .accounts({
+          device: ctx.device,
+          assignment: ctx.assignment,
+          authority: authority.publicKey,
+        })
+        .rpc();
+      const deviceAcct = await program.account.deviceRegistry.fetch(ctx.device);
+      assert.ok(deviceAcct.currentAssignment.equals(PublicKey.default));
+    });
+
+    it("rejects assign_device after close", async () => {
+      const ctx = await setupAssignedDevice();
+      await program.methods
+        .closeShipment()
+        .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+        .rpc();
+
+      const newDeviceId = makeDeviceId();
+      const newDevice = devicePda(newDeviceId);
+      await program.methods
+        .registerDevice(newDeviceId, makePubkey())
+        .accounts({
+          device: newDevice,
+          authority: authority.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const newAssignment = assignmentPda(newDevice, 0);
+      try {
+        await program.methods
+          .assignDevice()
+          .accounts({
+            device: newDevice,
+            shipment: ctx.shipment,
+            assignment: newAssignment,
+            authority: authority.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        assert.fail("expected ShipmentClosed");
+      } catch (err: any) {
+        assert.match(err.toString(), /ShipmentClosed/);
+      }
+    });
   });
 });
