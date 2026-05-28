@@ -10,12 +10,16 @@ pub enum ColdchainError {
     AssignmentAlreadyEnded,
     #[msg("Assignment account does not match device's current assignment")]
     AssignmentMismatch,
-    #[msg("Invalid shipment status transition")]
-    InvalidStatusTransition,
     #[msg("Shipment is closed and cannot accept new operations")]
     ShipmentClosed,
-    #[msg("Cannot assign device to a shipment that is not in transit or created")]
-    ShipmentNotAcceptingDevices,
+    #[msg("Submitter is not the authority of the device referenced by the assignment")]
+    UnauthorizedSubmitter,
+    #[msg("Assignment's device field does not match the provided device account")]
+    AssignmentDeviceMismatch,
+    #[msg("Assignment has been ended; cannot submit proofs against it")]
+    AssignmentEnded,
+    #[msg("Unauthorized: signer does not match the required authority")]
+    Unauthorized,
     #[msg("Arithmetic overflow")]
     ArithmeticOverflow,
 }

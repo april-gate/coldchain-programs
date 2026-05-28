@@ -2,34 +2,42 @@
 
 Solana on-chain programs for [April Gate](https://aprilgatehq.com) — tamper-evident cold chain verification for pharmaceutical cargo.
 
-This repository contains the on-chain components: device registry, shipment lifecycle, immutable assignment history, and consensus commitment storage. The off-chain consensus engine lives in [coldchain-core](https://github.com/april-gate/coldchain-core).
+This repository contains the on-chain components: device registry, shipment lifecycle, immutable assignment history, and consensus dispatch records. The off-chain consensus engine lives in [coldchain-core](https://github.com/april-gate/coldchain-core).
+
+> **Colosseum May 2026 submission:** [`colosseum-submission-may2026`](https://github.com/april-gate/coldchain-programs/releases/tag/colosseum-submission-may2026). Devnet program: `APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP`.
+>
+> Main branch reflects active post-submission development.
 
 ## Program
 
 | Name | Program ID |
 |---|---|
-| `device_registry` | `APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP` |
+| `device_registry` | `APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez` |
 
-The program is pinned to this address on every cluster. The deploy keypair lives at `APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP.json` at the repo root — its filename is its public key, so the keypair's identity is self-evident.
+The program is pinned to this address on every cluster. The deploy keypair lives at `APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez.json` at the repo root — its filename is its public key, so the keypair's identity is self-evident.
 
-## Deployments
+## Architecture
 
-| Cluster | Program | Deploy transaction | IDL account |
-|---|---|---|---|
-| devnet | [`APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP`](https://solscan.io/account/APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP?cluster=devnet) | [`2QcXmnEF…YdkW`](https://solscan.io/tx/2QcXmnEFz2dnVNzPNjdwHio3DTs5FP56qkQq8kzoe4BRAX9kCUBHpW3NHwHgvZCYDkfz338ffC3r8Zuue93mDYdkW?cluster=devnet) | [`Go4Lhea…23n1m`](https://solscan.io/account/Go4LheavUvDmRzgU9eAQ3ygYEMqErYsWKWE3vmH23n1m?cluster=devnet) |
+April Gate is structured as three layers, each with a distinct responsibility and trust model:
 
-The full integration test suite passes against this deployed program — every state transition, account creation, and `getProgramAccounts` query exercised below is verifiable on-chain.
+**On-chain witness (this program).** A Solana program that records the lifecycle of EQS (Ephemeral Quorum Subnet) shipment-monitoring instances: subnet formation, device-to-subnet assignment, consensus dispatches from members, and subnet dissolution. The chain authenticates that submitters are registered, hardware-rooted devices and records their dispatches. It does not arbitrate the subnet's internal consensus protocol.
+
+**Operator authority.** The shipment authority key founds each subnet, maintains the off-chain manifest (route, temperature range, deadlines, lot numbers, quorum policy, expected cluster), and dissolves the subnet when the shipment completes. The chain binds the off-chain manifest via a 32-byte commitment.
+
+**Off-chain data availability.** Operational detail that does not belong on a public chain — full readings, decrypted diagnostics, human-readable context — lives in customer-controlled storage, consumed by insurers, lawyers, and auditors alongside the on-chain dispatch record. This layer lives in [coldchain-core](https://github.com/april-gate/coldchain-core).
+
+The chain alone answers a single factual question: *did registered devices anchor consensus dispatches, in what sequence, between a shipment's start and close transactions?* Whether a given dispatch count meets a shipment's compliance bar is determined off-chain by parties holding the manifest. The chain is evidentiary; interpretation is human.
 
 ## Why this design
 
-Cold-chain disputes cost the pharmaceutical industry $35B annually. The verification problem is structural: temperature logs are stored centrally, can be edited, backdated, and challenged in court. April Gate replaces thousands of mutable readings with a single tamper-evident proof, anchored on Solana.
+Cold-chain disputes cost the pharmaceutical industry billions annually. The verification problem is structural: temperature logs are stored centrally, can be edited, backdated, and challenged in court. April Gate replaces thousands of mutable readings with a stream of tamper-evident consensus dispatches anchored on Solana, each signed by a hardware-rooted device identity.
 
 The `device_registry` program records:
 
-1. **Hardware-rooted device identity.** Each device's identity is its ATECC608 secure element serial — burned in at the factory, with a public key whose private half cannot be exfiltrated.
-2. **Shipment lifecycle.** A state machine: `Created → InTransit → Delivered → Closed`. `Closed` is terminal. Invalid transitions are rejected on-chain.
+1. **Hardware-rooted device identity.** Each device's identity is its ATECC608 secure element serial — burned in at the factory, with a public key whose private half cannot be exfiltrated. Only a device's recorded authority can submit dispatches under its assignment.
+2. **Shipment lifecycle.** A subnet is *founded* (`create_shipment`), *active*, then *dissolved* (`close_shipment`, one-way). The chain tracks only this minimal bracketing — not human-interpretive status. Operational lifecycle (in transit, delivered, spoiled) is the operator's off-chain concern.
 3. **Immutable assignment history.** Every device-to-shipment assignment creates a new PDA, never overwrites. An insurance investigator querying a shipment 18 months later sees the full chronological history of every device that ever carried it.
-4. **Consensus commitments.** Off-chain consensus proofs (BLS-aggregated, generated by [coldchain-core](https://github.com/april-gate/coldchain-core)) are committed on-chain against specific assignments, providing a verifiable chain of custody.
+4. **Consensus dispatches.** Each round of off-chain quorum consensus produces a 32-byte commitment, anchored on-chain against the shipment. No per-dispatch account is created — the dispatch lives as an event in the transaction log, and the shipment's commitment count is updated in place. On-chain storage per shipment is O(1) regardless of dispatch count.
 
 ## Account model
 
@@ -44,10 +52,11 @@ DeviceRegistry          PDA: [b"device", device_id]
 
 Shipment                PDA: [b"shipment", authority, nonce]
   ├── authority           32 B
-  ├── nonce                8 B
-  ├── status               1 B  (enum: Created | InTransit | Delivered | Closed)
-  ├── created_at           8 B
-  ├── proof_count          4 B
+  ├── nonce               32 B  (unguessable shipment identifier)
+  ├── manifest_commitment 32 B  (hash binding the off-chain manifest)
+  ├── proof_count          4 B  (consensus dispatches anchored so far)
+  ├── last_commitment     32 B  (most recent dispatch's commitment)
+  ├── closed               1 B  (bool; one-way terminal flag)
   └── bump                 1 B
 
 DeviceAssignment        PDA: [b"assignment", device, sequence_le_bytes]
@@ -57,36 +66,29 @@ DeviceAssignment        PDA: [b"assignment", device, sequence_le_bytes]
   ├── authority           32 B
   ├── assigned_at          8 B
   ├── ended_at             8 B  (0 = still active)
-  ├── proof_count          4 B
-  └── bump                 1 B
-
-Proof                   PDA: [b"proof", assignment, sequence_le_bytes]
-  ├── assignment          32 B
-  ├── sequence             4 B
-  ├── commitment          32 B  (hash binding the off-chain aggregated proof)
-  ├── submitter           32 B
-  ├── submitted_at         8 B
+  ├── proof_count          4 B  (per-assignment dispatch count, off-chain accounting)
   └── bump                 1 B
 ```
 
-The PDA seed structures enable native on-chain queries:
+There is no per-dispatch account. The audit trail of dispatches is the transaction log: each `submit_proof` emits a `ProofSubmitted` event, retrievable via standard Solana RPC (`getSignaturesForAddress` on the shipment PDA, then parse each transaction's events). Solana's `blockTime` provides the authoritative chain-witnessed timestamp.
+
+The PDA seed structures enable native on-chain queries without an off-chain indexer:
 
 - **All devices ever on shipment X** — `getProgramAccounts(DeviceAssignment, memcmp on shipment field)`.
 - **Full assignment history for device D** — derive PDAs at sequences `0..device.assignment_count`.
-- **All proofs for assignment A** — `getProgramAccounts(Proof, memcmp on assignment field)` or derive at sequences `0..assignment.proof_count`.
 
-No off-chain indexer required.
+Shipment nonces are 32-byte unguessable values rather than sequential integers, so an observer who knows an operator's authority wallet cannot enumerate the operator's shipments by guessing nonces.
 
 ## Instructions
 
 | Instruction | Purpose |
 |---|---|
 | `register_device` | Create a `DeviceRegistry` PDA from a 32-byte device ID and 33-byte public key |
-| `create_shipment` | Create a `Shipment` PDA in `Created` state |
-| `update_shipment_status` | Transition a shipment's status; rejects invalid transitions |
-| `assign_device` | Create an immutable `DeviceAssignment` linking device → shipment |
-| `end_assignment` | Mark the current assignment as ended (timestamps `ended_at`) |
-| `submit_proof` | Record a 32-byte commitment binding an off-chain aggregated proof to an active assignment |
+| `create_shipment` | Found a shipment subnet: a `Shipment` PDA bound to a 32-byte nonce and manifest commitment |
+| `assign_device` | Create an immutable `DeviceAssignment` linking device → shipment (rejected if shipment is closed) |
+| `end_assignment` | Mark the current assignment as ended (permitted regardless of shipment closed state) |
+| `submit_proof` | Anchor a 32-byte consensus dispatch commitment against an active assignment; submitter must be the device's recorded authority |
+| `close_shipment` | Dissolve the subnet (authority-only, one-way); after close, no new dispatches or assignments are accepted |
 
 Every state-changing instruction emits an event for off-chain indexing.
 
@@ -106,7 +108,7 @@ Anchor expects the program keypair at `target/deploy/device_registry-keypair.jso
 ```bash
 yarn install
 mkdir -p target/deploy
-cp APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP.json target/deploy/device_registry-keypair.json
+cp APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez.json target/deploy/device_registry-keypair.json
 anchor build
 ```
 
@@ -114,7 +116,7 @@ Verify the program ID matches:
 
 ```bash
 anchor keys list
-# device_registry: APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP
+# device_registry: APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez
 ```
 
 ### Test
@@ -125,14 +127,15 @@ The test suite runs against an ephemeral local validator:
 anchor test
 ```
 
-Six test cases exercise:
+The suite exercises:
 
 - Device registration with PDA derivation
-- Shipment creation and status verification
-- Status state machine transitions (`Created → InTransit → Delivered → Closed`)
-- Rejection of invalid status transitions
-- Full lifecycle: register → assign → submit proofs → reject duplicate assignment → end → reassign with history preserved
+- Shipment creation with 32-byte nonce and manifest commitment
+- Assignment lifecycle: assign → reject duplicate → end → reassign with history preserved
 - `getProgramAccounts` + `memcmp` query proving "all devices ever on shipment X" works on-chain
+- Consensus dispatch submission: sequence ordering, per-shipment and per-assignment counts, `last_commitment` update
+- Hardware-rooted submitter enforcement: dispatches from a non-authority signer are rejected
+- Shipment close: one-way terminal flag, rejection of dispatches and assignments after close, `end_assignment` still permitted post-close
 
 ### Deploy to devnet
 
@@ -152,7 +155,7 @@ anchor test --provider.cluster devnet --skip-deploy --skip-local-validator
 
 ```
 .
-├── APRu6...json                        Program deploy keypair (= program ID)
+├── APRBV...json                        Program deploy keypair (= program ID)
 ├── Anchor.toml                         Anchor workspace config
 ├── Cargo.toml                          Rust workspace config
 ├── package.json                        TypeScript test dependencies
@@ -162,17 +165,17 @@ anchor test --provider.cluster devnet --skip-deploy --skip-local-validator
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs                      #[program] entry point + dispatch
-│       ├── state.rs                    Account types and lifecycle helpers
+│       ├── state.rs                    Account types
 │       ├── errors.rs                   Custom error codes
 │       ├── events.rs                   Emitted events
 │       └── instructions/
 │           ├── mod.rs
 │           ├── register_device.rs
 │           ├── create_shipment.rs
-│           ├── update_shipment_status.rs
 │           ├── assign_device.rs
 │           ├── end_assignment.rs
-│           └── submit_proof.rs
+│           ├── submit_proof.rs
+│           └── close_shipment.rs
 │
 └── tests/
     └── device-registry.ts              Integration tests (mocha + chai)
@@ -181,9 +184,9 @@ anchor test --provider.cluster devnet --skip-deploy --skip-local-validator
 ## Roadmap
 
 - **Multi-authority workflows.** Device manufacturer registers and owns devices; logistics operator creates shipments; assignment requires both signatures. Mirrors real-world responsibility split.
-- **Cross-vendor device identifiers.** The 23 reserved bytes in `device_id` will encode a vendor namespace tag (ATECC608, NXP A1006, STSAFE, etc.) so the registry can accommodate multiple secure-element families.
-- **Status extensions.** Add `Disputed` and `Cancelled` states for real-world insurance and exception flows.
-- **Permissionless verification (ZK).** Today, the on-chain commitment binds an off-chain BLS aggregate produced by the sensor quorum, and compliance verdicts are served by the operator's API to authorized parties. This is the right model when the operator is trusted by all consumers of the data (insurers, regulators) — which is the case in our insurer-first GTM. For deployments where consumers need to verify compliance directly from Solana without trusting the operator (public regulators, consortium operators, third-party auditors), `submit_proof` can be extended to accept a Groth16 proof verified entirely on-chain — proving the quorum agreed on readings within bounds, without revealing the readings themselves. ZK is a mode the architecture supports when the trust model demands it, not a default requirement when the existing BLS aggregate already cryptographically attests that a threshold of hardware-rooted devices agreed.
+- **Cross-vendor device identifiers.** The reserved bytes in `device_id` will encode a vendor namespace tag (ATECC608, NXP A1006, STSAFE, etc.) so the registry can accommodate multiple secure-element families.
+- **Open-source verification tooling.** A CLI that reconstructs a shipment's full dispatch history from the transaction log, verifies each dispatch, and prints a compliance verdict against the off-chain manifest — making the on-chain record independently auditable by anyone, without trusting the operator's API.
+- **Immutable program authority.** Move the program's upgrade authority to a timelocked multisig before mainnet deploy, so any program change is publicly visible before activation.
 
 ## License
 

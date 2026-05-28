@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use crate::state::{DeviceId, ShipmentStatus};
+use crate::state::DeviceId;
 
 #[event]
 pub struct DeviceRegistered {
@@ -8,20 +8,21 @@ pub struct DeviceRegistered {
     pub authority: Pubkey,
 }
 
+/// Emitted by `create_shipment`. Marks subnet formation.
 #[event]
 pub struct ShipmentCreated {
     pub shipment: Pubkey,
     pub authority: Pubkey,
-    pub nonce: u64,
-    pub created_at: i64,
+    pub manifest_commitment: [u8; 32],
 }
 
+/// Emitted by `close_shipment`. Marks subnet dissolution. Final proof_count
+/// is captured here so an auditor reading just the close transaction's logs
+/// knows the total dispatch count without also fetching the Shipment account.
 #[event]
-pub struct ShipmentStatusChanged {
+pub struct ShipmentClosed {
     pub shipment: Pubkey,
-    pub from: ShipmentStatus,
-    pub to: ShipmentStatus,
-    pub changed_at: i64,
+    pub proof_count: u32,
 }
 
 #[event]
@@ -41,11 +42,17 @@ pub struct AssignmentEnded {
     pub ended_at: i64,
 }
 
+/// Emitted by `submit_proof`. The per-round audit record — a subnet member's
+/// consensus dispatch — lives in the transaction log permanently. Solana
+/// blockTime (via getTransaction) is the authoritative chain-witnessed
+/// timestamp; not duplicated here.
 #[event]
 pub struct ProofSubmitted {
+    pub shipment: Pubkey,
     pub assignment: Pubkey,
-    pub proof: Pubkey,
+    pub device: Pubkey,
+    /// Chain-assigned sequence within this shipment. 0 for the first proof.
     pub sequence: u32,
+    /// 32-byte hash binding the off-chain consensus dispatch content.
     pub commitment: [u8; 32],
-    pub submitted_at: i64,
 }
