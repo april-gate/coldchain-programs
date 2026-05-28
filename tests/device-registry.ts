@@ -37,6 +37,23 @@ describe("device-registry", () => {
     return Array.from(crypto.randomBytes(32));
   }
 
+    /**
+     * Fund a keypair by transferring from the provider wallet, avoiding the
+     * devnet airdrop faucet (which is rate-limited and fails in CI / repeated runs).
+     * Works identically on localnet and devnet.
+     */
+    async function fundFromProvider(target: PublicKey, lamports: number) {
+        const tx = new anchor.web3.Transaction().add(
+            SystemProgram.transfer({
+                fromPubkey: authority.publicKey,
+                toPubkey: target,
+                lamports,
+            })
+        );
+        await provider.sendAndConfirm(tx);
+    }
+
+
   function devicePda(deviceId: number[]): PublicKey {
     const [pda] = PublicKey.findProgramAddressSync(
       [Buffer.from("device"), Buffer.from(deviceId)],
@@ -379,9 +396,8 @@ describe("device-registry", () => {
 
     it("rejects a dispatch from an unauthorized submitter", async () => {
       const ctx = await setupAssignedDevice();
-      const wrong = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(wrong.publicKey, 1e8);
-      await provider.connection.confirmTransaction(sig);
+        const wrong = Keypair.generate();
+        await fundFromProvider(wrong.publicKey, 1e7); // 0.01 SOL, plenty for one failed tx
 
       try {
         await program.methods
@@ -447,9 +463,8 @@ describe("device-registry", () => {
 
     it("rejects close from a non-authority signer", async () => {
       const ctx = await setupAssignedDevice();
-      const wrong = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(wrong.publicKey, 1e8);
-      await provider.connection.confirmTransaction(sig);
+        const wrong = Keypair.generate();
+        await fundFromProvider(wrong.publicKey, 1e7); // 0.01 SOL, plenty for one failed tx
 
       try {
         await program.methods
