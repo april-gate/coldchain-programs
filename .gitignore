@@ -10,3 +10,11 @@ test-ledger
 .env.*.local
 .idea/
 *.log
+*.zip
+
+# Solana program / wallet keypairs — keep locally (filename = program ID, handy
+# for reference) but never commit the secret key material.
+APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez.json
+APRN34enDv9Z92qYjqJTcPfeURxTDQ1hjAZdn5oC6iUP.json
+APRgtpDn5MffxzjmQnQbnSfYZDM3j8jorEMqHwDDkPYz.json
+APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP.json

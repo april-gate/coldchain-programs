@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use solana_sha256_hasher::hashv;
 use crate::state::*;
 use crate::events::*;
 use crate::errors::*;
@@ -10,6 +11,20 @@ pub fn handler(ctx: Context<SubmitProof>, commitment: [u8; 32]) -> Result<()> {
     require!(!shipment.closed, ColdchainError::ShipmentClosed);
 
     let sequence = shipment.proof_count;
+
+    // Fold this proof into the integrity hash chain BEFORE incrementing
+    // proof_count, so the sequence bound into the hash matches the event's
+    // sequence number (0 for the first proof). Input order is fixed:
+    //   prev_chain_hash (32) || proof_commitment (32) || sequence_le (4)
+    // Folding the sequence in prevents an attacker from reordering proofs and
+    // arriving at the same final chain hash.
+    let new_chain_hash = hashv(&[
+        &shipment.chain_hash[..],
+        &commitment[..],
+        &sequence.to_le_bytes()[..],
+    ])
+    .to_bytes();
+    shipment.chain_hash = new_chain_hash;
 
     shipment.proof_count = shipment
         .proof_count
@@ -29,6 +44,7 @@ pub fn handler(ctx: Context<SubmitProof>, commitment: [u8; 32]) -> Result<()> {
         device: ctx.accounts.device.key(),
         sequence,
         commitment,
+        chain_hash_after: new_chain_hash,
     });
 
     Ok(())

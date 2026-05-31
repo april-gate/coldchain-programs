@@ -22,4 +22,8 @@ pub enum ColdchainError {
     Unauthorized,
     #[msg("Arithmetic overflow")]
     ArithmeticOverflow,
+    #[msg("Shipment must be closed before it can be attested")]
+    ShipmentNotClosed,
+    #[msg("Shipment has reached its maximum attestation capacity")]
+    AttestationCapacityExceeded,
 }

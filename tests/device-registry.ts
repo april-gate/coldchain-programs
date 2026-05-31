@@ -1,7 +1,13 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { DeviceRegistry } from "../target/types/device_registry";
-import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
+
+import {
+  PublicKey,
+  Keypair,
+  SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+} from "@solana/web3.js";
 import { assert } from "chai";
 import * as crypto from "crypto";
 
@@ -123,6 +129,82 @@ describe("device-registry", () => {
       .rpc();
 
     return { deviceId, device, nonce, shipment, assignment, manifest };
+  }
+
+  /** SHA-256 of the concatenation of the given buffers (mirrors on-chain hashv). */
+  function sha256(...parts: Buffer[]): Buffer {
+    const h = crypto.createHash("sha256");
+    for (const p of parts) h.update(p);
+    return h.digest();
+  }
+
+  /**
+   * Client-side replica of the on-chain genesis chain hash:
+   *   SHA256("april-gate-shipment-genesis-v1" || shipment_pda || created_at_le)
+   */
+  function genesisChainHash(shipmentPda: PublicKey, createdAt: anchor.BN): Buffer {
+    return sha256(
+      Buffer.from("april-gate-shipment-genesis-v1"),
+      shipmentPda.toBuffer(),
+      createdAt.toArrayLike(Buffer, "le", 8)
+    );
+  }
+
+  /**
+   * Client-side replica of one on-chain chain fold:
+   *   SHA256(prev_chain_hash || proof_commitment || sequence_u32_le)
+   */
+  function foldProof(prev: Buffer, commitment: number[], sequence: number): Buffer {
+    const seq = Buffer.alloc(4);
+    seq.writeUInt32LE(sequence, 0);
+    return sha256(prev, Buffer.from(commitment), seq);
+  }
+
+  /** Submit a single proof commitment against an assigned device's shipment. */
+  async function submitProof(ctx: any, commitment: number[]) {
+    await program.methods
+      .submitProof(commitment)
+      .accounts({
+        assignment: ctx.assignment,
+        shipment: ctx.shipment,
+        device: ctx.device,
+        submitter: authority.publicKey,
+      })
+      .rpc();
+  }
+
+  /** Set up an assigned device, submit `nProofs` proofs, then close the shipment. */
+  async function setupClosedShipment(nProofs = 2) {
+    const ctx = await setupAssignedDevice();
+    for (let i = 0; i < nProofs; i++) {
+      await submitProof(ctx, rand32());
+    }
+    await program.methods
+      .closeShipment()
+      .accounts({ shipment: ctx.shipment, authority: authority.publicKey })
+      .rpc();
+    return ctx;
+  }
+
+  /** Attest a shipment as `verifier`. Defaults to the provider wallet. */
+  async function attest(
+    shipment: PublicKey,
+    chainHashAtVerification: number[],
+    outcome: any,
+    verifier?: Keypair
+  ) {
+    const verifierKey = verifier ? verifier.publicKey : authority.publicKey;
+    const signature = Array.from(crypto.randomBytes(64));
+    const builder = program.methods
+      .attestShipmentVerification(chainHashAtVerification, outcome, signature)
+      .accounts({
+        shipment,
+        verifier: verifierKey,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      });
+    if (verifier) builder.signers([verifier]);
+    await builder.rpc();
   }
 
   // Device ─────────────────────────────────────────────────────────────────────
@@ -554,6 +636,176 @@ describe("device-registry", () => {
       } catch (err: any) {
         assert.match(err.toString(), /ShipmentClosed/);
       }
+    });
+  });
+
+  // Hash chain ───────────────────────────────────────────────────────────────────
+
+  describe("chain_hash", () => {
+    it("test_chain_hash_genesis: genesis equals SHA256(domain || pda || created_at)", async () => {
+      const ctx = await setupAssignedDevice();
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      const expected = genesisChainHash(ctx.shipment, acct.createdAt);
+      assert.deepEqual(Buffer.from(acct.chainHash), expected);
+    });
+
+    it("test_chain_hash_single_proof: chain folds one commitment at sequence 0", async () => {
+      const ctx = await setupAssignedDevice();
+      const before = await program.account.shipment.fetch(ctx.shipment);
+      const genesis = genesisChainHash(ctx.shipment, before.createdAt);
+
+      const commitment = rand32();
+      await submitProof(ctx, commitment);
+
+      const after = await program.account.shipment.fetch(ctx.shipment);
+      const expected = foldProof(genesis, commitment, 0);
+      assert.deepEqual(Buffer.from(after.chainHash), expected);
+    });
+
+    it("test_chain_hash_multiple_proofs: chain matches a client-side replay of N=5", async () => {
+      const ctx = await setupAssignedDevice();
+      const acct0 = await program.account.shipment.fetch(ctx.shipment);
+
+      let expected = genesisChainHash(ctx.shipment, acct0.createdAt);
+      const N = 5;
+      for (let seq = 0; seq < N; seq++) {
+        const commitment = rand32();
+        await submitProof(ctx, commitment);
+        expected = foldProof(expected, commitment, seq);
+      }
+
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      assert.equal(acct.proofCount, N);
+      assert.deepEqual(Buffer.from(acct.chainHash), expected);
+    });
+
+    it("test_chain_hash_order_dependency: same commitments in different order → different final hash", async () => {
+      const a = await setupAssignedDevice();
+      const b = await setupAssignedDevice();
+
+      const c1 = rand32();
+      const c2 = rand32();
+
+      await submitProof(a, c1);
+      await submitProof(a, c2);
+
+      await submitProof(b, c2);
+      await submitProof(b, c1);
+
+      const acctA = await program.account.shipment.fetch(a.shipment);
+      const acctB = await program.account.shipment.fetch(b.shipment);
+
+      assert.notDeepEqual(Buffer.from(acctA.chainHash), Buffer.from(acctB.chainHash));
+
+      // And each independently matches its own ordered client-side replay,
+      // confirming the difference is driven by the folded sequence, not noise.
+      const genA = genesisChainHash(a.shipment, acctA.createdAt);
+      const expectedA = foldProof(foldProof(genA, c1, 0), c2, 1);
+      assert.deepEqual(Buffer.from(acctA.chainHash), expectedA);
+
+      const genB = genesisChainHash(b.shipment, acctB.createdAt);
+      const expectedB = foldProof(foldProof(genB, c2, 0), c1, 1);
+      assert.deepEqual(Buffer.from(acctB.chainHash), expectedB);
+    });
+
+    it("emits chain_hash_after on ProofSubmitted matching the stored chain hash", async () => {
+      const ctx = await setupAssignedDevice();
+
+      const listener = new Promise<any>((resolve) => {
+        const id = program.addEventListener("proofSubmitted", (ev) => {
+          program.removeEventListener(id);
+          resolve(ev);
+        });
+      });
+
+      await submitProof(ctx, rand32());
+      const ev = await listener;
+
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      assert.deepEqual(Buffer.from(ev.chainHashAfter), Buffer.from(acct.chainHash));
+    });
+  });
+
+  // Attestation ──────────────────────────────────────────────────────────────────
+
+  describe("attest_shipment_verification", () => {
+    it("test_attest_closed_shipment: records the attestation with correct fields", async () => {
+      const ctx = await setupClosedShipment();
+      const acctBefore = await program.account.shipment.fetch(ctx.shipment);
+      const chainHash = acctBefore.chainHash;
+
+      await attest(ctx.shipment, chainHash, { passed: {} });
+
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      assert.equal(acct.attestations.length, 1);
+      const att = acct.attestations[0];
+      assert.ok(att.verifier.equals(authority.publicKey));
+      assert.deepEqual(att.chainHashAtVerification, chainHash);
+      assert.deepEqual(att.outcome, { passed: {} });
+      assert.ok(att.verifiedAt.toNumber() > 0);
+    });
+
+    it("test_attest_open_shipment_fails: rejects with ShipmentNotClosed", async () => {
+      const ctx = await setupAssignedDevice(); // not closed
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      try {
+        await attest(ctx.shipment, acct.chainHash, { passed: {} });
+        assert.fail("expected ShipmentNotClosed");
+      } catch (err: any) {
+        assert.match(err.toString(), /ShipmentNotClosed/);
+      }
+    });
+
+    it("test_multiple_attestations_different_verifiers: both attestations are present", async () => {
+      const ctx = await setupClosedShipment();
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      const chainHash = acct.chainHash;
+
+      const v1 = Keypair.generate();
+      const v2 = Keypair.generate();
+      await fundFromProvider(v1.publicKey, 1e7);
+      await fundFromProvider(v2.publicKey, 1e7);
+
+      await attest(ctx.shipment, chainHash, { passed: {} }, v1);
+      await attest(ctx.shipment, chainHash, { failedExcursion: {} }, v2);
+
+      const after = await program.account.shipment.fetch(ctx.shipment);
+      assert.equal(after.attestations.length, 2);
+      const verifiers = after.attestations.map((a: any) => a.verifier.toBase58());
+      assert.include(verifiers, v1.publicKey.toBase58());
+      assert.include(verifiers, v2.publicKey.toBase58());
+    });
+
+    it("test_attestation_capacity_limit: 8 succeed, the 9th fails", async () => {
+      const ctx = await setupClosedShipment();
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      const chainHash = acct.chainHash;
+
+      // No dedup by verifier — the same signer may attest repeatedly.
+      for (let i = 0; i < 8; i++) {
+        await attest(ctx.shipment, chainHash, { passed: {} });
+      }
+      const full = await program.account.shipment.fetch(ctx.shipment);
+      assert.equal(full.attestations.length, 8);
+
+      try {
+        await attest(ctx.shipment, chainHash, { passed: {} });
+        assert.fail("expected AttestationCapacityExceeded");
+      } catch (err: any) {
+        assert.match(err.toString(), /AttestationCapacityExceeded/);
+      }
+    });
+
+    it("test_attestation_records_chain_hash: stored chain_hash matches the shipment's chain_hash", async () => {
+      const ctx = await setupClosedShipment(3);
+      const acct = await program.account.shipment.fetch(ctx.shipment);
+      const chainHash = acct.chainHash;
+
+      await attest(ctx.shipment, chainHash, { inconclusive: {} });
+
+      const after = await program.account.shipment.fetch(ctx.shipment);
+      assert.deepEqual(after.attestations[0].chainHashAtVerification, after.chainHash);
+      assert.deepEqual(after.attestations[0].chainHashAtVerification, chainHash);
     });
   });
 });

@@ -9,7 +9,7 @@ pub mod instructions;
 // which is where the #[program] macro expects to find Accounts structs and
 // their auto-generated __client_accounts_* / __cpi_client_accounts_* modules.
 pub use instructions::*;
-use state::DeviceId;
+use state::{DeviceId, VerificationOutcome};
 
 declare_id!("APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez");
 
@@ -61,5 +61,25 @@ pub mod device_registry {
     /// new dispatches or assignments are accepted.
     pub fn close_shipment(ctx: Context<CloseShipment>) -> Result<()> {
         instructions::close_shipment::handler(ctx)
+    }
+
+    /// Record an off-chain verification attestation against a closed shipment.
+    /// Additive and multi-party: any signer may attest, and a shipment may
+    /// accrue several attestations from distinct verifiers (up to
+    /// `Shipment::MAX_ATTESTATIONS`). The attestation pins to the shipment's
+    /// `chain_hash` at verification time and is stored inline on the Shipment
+    /// PDA so verification status is readable in a single account fetch.
+    pub fn attest_shipment_verification(
+        ctx: Context<AttestShipmentVerification>,
+        chain_hash_at_verification: [u8; 32],
+        outcome: VerificationOutcome,
+        attestation_signature: [u8; 64],
+    ) -> Result<()> {
+        instructions::attest_shipment_verification::handler(
+            ctx,
+            chain_hash_at_verification,
+            outcome,
+            attestation_signature,
+        )
     }
 }
