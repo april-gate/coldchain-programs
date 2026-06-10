@@ -9,9 +9,9 @@ pub mod instructions;
 // which is where the #[program] macro expects to find Accounts structs and
 // their auto-generated __client_accounts_* / __cpi_client_accounts_* modules.
 pub use instructions::*;
-use state::{DeviceId, ShipmentStatus};
+use state::{DeviceId, VerificationOutcome};
 
-declare_id!("APRu6WGxe1NC4X2FrcLpujRRtqLNfMTSt6fYp5wQZVtP");
+declare_id!("APRBVwwJJeStD5wShyg4HivneDYj4TCPYKtSFX5F4jez");
 
 #[program]
 pub mod device_registry {
@@ -26,34 +26,60 @@ pub mod device_registry {
         instructions::register_device::handler(ctx, device_id, pubkey)
     }
 
-    /// Create a new shipment owned by the caller. Status starts as Created.
-    pub fn create_shipment(ctx: Context<CreateShipment>, nonce: u64) -> Result<()> {
-        instructions::create_shipment::handler(ctx, nonce)
-    }
-
-    /// Transition a shipment's status. Allowed transitions:
-    /// Created → InTransit → Delivered → Closed.
-    pub fn update_shipment_status(
-        ctx: Context<UpdateShipmentStatus>,
-        new_status: ShipmentStatus,
+    /// Found a shipment subnet. `nonce` is a 32-byte unguessable identifier;
+    /// `manifest_commitment` binds the off-chain shipment manifest.
+    pub fn create_shipment(
+        ctx: Context<CreateShipment>,
+        nonce: [u8; 32],
+        manifest_commitment: [u8; 32],
     ) -> Result<()> {
-        instructions::update_shipment_status::handler(ctx, new_status)
+        instructions::create_shipment::handler(ctx, nonce, manifest_commitment)
     }
 
     /// Assign a device to a shipment. Creates an immutable DeviceAssignment
-    /// PDA, preserving the device's full assignment history.
+    /// PDA, preserving the device's full assignment history. Rejected if the
+    /// shipment is closed.
     pub fn assign_device(ctx: Context<AssignDevice>) -> Result<()> {
         instructions::assign_device::handler(ctx)
     }
 
-    /// Mark the device's current assignment as ended.
+    /// Mark the device's current assignment as ended. Permitted regardless of
+    /// shipment closed state, so devices can be freed for reuse.
     pub fn end_assignment(ctx: Context<EndAssignment>) -> Result<()> {
         instructions::end_assignment::handler(ctx)
     }
 
-    /// Submit a ZK proof commitment against an active assignment.
-    /// MVP stores commitment only; production verifies Groth16 on-chain.
+    /// Submit a consensus dispatch commitment against an active assignment.
+    /// The submitter must be the device's recorded hardware-rooted authority.
+    /// No account is created; the Shipment PDA is updated and the dispatch is
+    /// emitted to the transaction log.
     pub fn submit_proof(ctx: Context<SubmitProof>, commitment: [u8; 32]) -> Result<()> {
         instructions::submit_proof::handler(ctx, commitment)
+    }
+
+    /// Dissolve the shipment subnet. Operator-only, one-way. After close, no
+    /// new dispatches or assignments are accepted.
+    pub fn close_shipment(ctx: Context<CloseShipment>) -> Result<()> {
+        instructions::close_shipment::handler(ctx)
+    }
+
+    /// Record an off-chain verification attestation against a closed shipment.
+    /// Additive and multi-party: any signer may attest, and a shipment may
+    /// accrue several attestations from distinct verifiers (up to
+    /// `Shipment::MAX_ATTESTATIONS`). The attestation pins to the shipment's
+    /// `chain_hash` at verification time and is stored inline on the Shipment
+    /// PDA so verification status is readable in a single account fetch.
+    pub fn attest_shipment_verification(
+        ctx: Context<AttestShipmentVerification>,
+        chain_hash_at_verification: [u8; 32],
+        outcome: VerificationOutcome,
+        attestation_signature: [u8; 64],
+    ) -> Result<()> {
+        instructions::attest_shipment_verification::handler(
+            ctx,
+            chain_hash_at_verification,
+            outcome,
+            attestation_signature,
+        )
     }
 }

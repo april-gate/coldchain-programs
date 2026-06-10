@@ -14,10 +14,7 @@ pub fn handler(ctx: Context<AssignDevice>) -> Result<()> {
         ColdchainError::DeviceAlreadyAssigned
     );
 
-    require!(
-        matches!(shipment.status, ShipmentStatus::Created | ShipmentStatus::InTransit),
-        ColdchainError::ShipmentNotAcceptingDevices
-    );
+    require!(!shipment.closed, ColdchainError::ShipmentClosed);
 
     let sequence = device.assignment_count;
 
